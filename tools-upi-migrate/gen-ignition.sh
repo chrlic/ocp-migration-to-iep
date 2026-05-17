@@ -155,6 +155,9 @@ spec:
   - mirrors:
     - ${ART_REPO}
     source: docker.io
+  - mirrors:
+    - ${ART_REPO}
+    source: registry.k8s.io
 EOF
 echo "    Written: ${INSTALL_DIR}/openshift/99-artifactory-idms.yaml"
 
@@ -183,6 +186,9 @@ spec:
   - mirrors:
     - ${ART_REPO}
     source: docker.io
+  - mirrors:
+    - ${ART_REPO}
+    source: registry.k8s.io
 EOF
 echo "    Written: ${INSTALL_DIR}/openshift/99-artifactory-itms.yaml"
 

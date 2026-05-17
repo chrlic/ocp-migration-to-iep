@@ -365,8 +365,14 @@ PYEOF
 # quay.io — OCP release images + Isovalent images (requires pull secret quay.io creds)
 create_proxy_repo "remote-quay" "https://quay.io" "REGISTRY" "" "${QUAY_USER}" "${QUAY_PASS}"
 
-# docker.io — community images (no auth needed)
-create_proxy_repo "remote-dockerhub" "https://registry-1.docker.io"
+# docker.io — community images.
+# IMPORTANT: Docker Hub rate-limits anonymous IPs to 100 pulls / 6h (`TOOMANYREQUESTS`).
+# In a lab where many pods share the bastion's NAT egress that quota is exhausted
+# almost immediately. Use an authenticated Docker Hub PAT (free tier raises the
+# limit to 200 pulls/6h per account). Generate at https://hub.docker.com/settings/security
+# with at least 'Public Repo Read' scope.
+create_proxy_repo "remote-dockerhub" "https://registry-1.docker.io" \
+  "" "" "${DOCKERHUB_USER}" "${DOCKERHUB_PASS}"
 
 # registry.redhat.io — uses CUSTOM indexType with correct service= parameter
 # Nexus defaults to service="registry.redhat.io" but RHCC token server requires service="docker-registry"
@@ -378,6 +384,10 @@ create_proxy_repo "remote-redhat" "https://registry.redhat.io" \
 create_proxy_repo "remote-connect" "https://registry.connect.redhat.com" \
   "CUSTOM" "https://registry.connect.redhat.com/auth/realms/rhcc/protocol/redhat-docker-v2/auth?service=docker-registry" \
   "${CONNECT_USER}" "${CONNECT_PASS}"
+
+# registry.k8s.io — Kubernetes SIG images (nfs-subdir-external-provisioner,
+# local-storage, etc.). Public, no auth.
+create_proxy_repo "remote-k8s" "https://registry.k8s.io"
 
 # --------------------------------------------------------------------------
 # 11. Create Docker group repository
@@ -392,7 +402,7 @@ HTTP=$(curl -s --noproxy "*" -u "admin:${ARTIFACTORY_PASS}" \
     \"online\": true,
     \"storage\": {\"blobStoreName\": \"default\", \"strictContentTypeValidation\": true},
     \"group\": {
-      \"memberNames\": [\"remote-quay\", \"remote-redhat\", \"remote-connect\", \"remote-dockerhub\"]
+      \"memberNames\": [\"remote-quay\", \"remote-redhat\", \"remote-connect\", \"remote-dockerhub\", \"remote-k8s\"]
     },
     \"docker\": {\"v1Enabled\": false, \"forceBasicAuth\": true, \"pathEnabled\": true}
   }")

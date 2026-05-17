@@ -1,0 +1,24 @@
+clickhouse:
+  cluster:
+    enabled: true
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "2Gi"
+      limits:
+        cpu: "2"
+        memory: "4Gi"
+    volumes:
+      data:
+        size: 50Gi
+        storageClassName: nfs-storage
+
+ingester:
+  bucket:
+    uri: "file:///var/run/hubble-timescape/flows"
+  server:
+    grpc:
+      enabled: true
+
+ui:
+  enabled: true

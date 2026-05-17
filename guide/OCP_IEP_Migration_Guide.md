@@ -1716,4 +1716,12 @@ oc get networkpolicy -A
 
 ---
 
+## Next steps
+
+After the cluster is migrated and healthy:
+
+- **[Hubble Timescape deployment](OCP_IEP_Timescape_Guide.md)** — add persistent flow observability on top of the migrated cluster. Standalone ClickHouse-backed Timescape with NFS-on-bastion storage, Stream API from Cilium, CLI + UI access. ~30 min end-to-end.
+
+---
+
 *Based on official Isovalent documentation: "Install Networking for Kubernetes on Red Hat OpenShift" and "Migrate from OpenShift OVN-Kubernetes to Networking for Kubernetes" (CLife 1.18.x)*

@@ -42,5 +42,6 @@ ocp-upi-migrate/**
 clife-known-good/**
 clife-pre-build-4/**
 doc-sources/**
+.config/**
 
 

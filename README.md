@@ -29,7 +29,8 @@ validated end-to-end across multiple wipe-and-rebuild iterations.
 ├── README.md                              ← this file
 ├── CLAUDE.md                              ← assistant context (project conventions)
 ├── guide/
-│   └── OCP_IEP_Migration_Guide.md         ← step-by-step runbook
+│   ├── OCP_IEP_Migration_Guide.md         ← step-by-step runbook (install → migrate → cleanup)
+│   └── OCP_IEP_Timescape_Guide.md         ← follow-up: persistent flow observability
 ├── tools-upi-migrate/                     ← all scripts (single source of truth)
 │   ├── lab-config.sh                      ← edit «CHANGE» items before anything else
 │   ├── setup-artifactory.sh               ← Nexus pull-through proxy
@@ -109,6 +110,11 @@ The full runbook with commands, expected output, and troubleshooting is
 [`guide/OCP_IEP_Migration_Guide.md`](guide/OCP_IEP_Migration_Guide.md). See
 **Section 1.4 — Scripts Overview** in the guide for the script-by-script
 ordering with cross-references to the guide sections that explain each step.
+
+After the migration is complete, the **follow-up guide
+[`guide/OCP_IEP_Timescape_Guide.md`](guide/OCP_IEP_Timescape_Guide.md)** adds
+**Hubble Timescape** — persistent flow observability backed by ClickHouse,
+queryable via the `hubble` CLI and the Hubble Timescape UI.
 
 ## Validated procedure
 
