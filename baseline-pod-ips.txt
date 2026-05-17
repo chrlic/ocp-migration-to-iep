@@ -1,0 +1,7 @@
+NAME                             READY   STATUS    RESTARTS   AGE   IP            NODE                                     NOMINATED NODE   READINESS GATES
+details-v1-698d88b-99f67         1/1     Running   0          60m   10.128.2.20   worker-m-0.ocp-migrate.md.prglab.local   <none>           <none>
+productpage-v1-675fc69cf-w9t49   1/1     Running   0          60m   10.131.0.17   worker-m-1.ocp-migrate.md.prglab.local   <none>           <none>
+ratings-v1-6484c4d9bb-6mjtj      1/1     Running   0          60m   10.128.2.21   worker-m-0.ocp-migrate.md.prglab.local   <none>           <none>
+reviews-v1-5b5d6494f4-xbftw      1/1     Running   0          60m   10.128.2.22   worker-m-0.ocp-migrate.md.prglab.local   <none>           <none>
+reviews-v2-5b667bcbf8-vskzz      1/1     Running   0          60m   10.128.2.23   worker-m-0.ocp-migrate.md.prglab.local   <none>           <none>
+reviews-v3-5b9bd44f4-ff9g8       1/1     Running   0          60m   10.128.2.24   worker-m-0.ocp-migrate.md.prglab.local   <none>           <none>

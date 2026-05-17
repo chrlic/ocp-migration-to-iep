@@ -1,0 +1,46 @@
+# Dependencies
+node_modules/
+vendor/
+
+# Build output
+dist/
+build/
+*.o
+*.pyc
+
+# Env/secrets
+.env
+.env.local
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+pull-secret*
+anaconda-ks.cfg
+.bash*
+.cshrc
+.wget-hsts
+networkpolicies-backup.yaml
+clife*
+CLAUDE.md
+.claude.json
+.tcshro
+.cache/**
+.claude/**
+.copilot/**
+.govmomi/**
+.kube/**
+.local/**
+.ssh/**
+.vscode-server/**
+ocp-upi-migrate/**
+clife-known-good/**
+clife-pre-build-4/**
+doc-sources/**
+
+
