@@ -1,14 +1,17 @@
-# OCP UPI → Isovalent Networking for Kubernetes Migration Lab
+# OCP UPI ↔ Isovalent Networking for Kubernetes Labs
 
-End-to-end automation and runbook for installing OpenShift 4.16 UPI on vSphere
-(`platform: none`) with a Nexus OSS pull-through proxy, then migrating the
-cluster in-place from OVN-Kubernetes to **Isovalent Networking for Kubernetes**
-(Isovalent Enterprise Cilium / IEP) using the CLife operator.
+End-to-end automation and runbooks for two parallel OpenShift UPI labs on
+vSphere (`platform: none`), both fronted by a shared Nexus OSS pull-through
+proxy on the same bastion host:
 
-This repository lives entirely on the bastion host. The procedure has been
-validated end-to-end across multiple wipe-and-rebuild iterations.
+1. **Migration lab** ([`OCP_IEP_Migration_Guide.md`](guide/OCP_IEP_Migration_Guide.md)) — OCP 4.16 + OVN-Kubernetes, then migrated in-place to **Isovalent Networking for Kubernetes 1.17** via the CLife operator. Validated end-to-end across multiple wipe-and-rebuild iterations.
+2. **Fresh-install lab** ([`OCP_IEP_Install_Guide.md`](guide/OCP_IEP_Install_Guide.md)) — OCP 4.20 + **IEP 1.18 baked in at bootstrap** (`networkType: Cilium`, no OVN). Parallel to the migration lab on the same bastion, distinct IP block (`.29-.37` vs `.19-.27`), distinct vSphere folder + ISO + HAProxy instance.
+
+Both labs include an inline / sibling Hubble Timescape deployment.
 
 ## Status
+
+### Migration lab (`tools-upi-migrate/`, validated)
 
 - **OCP version:** 4.16.36 UPI, `platform: none`
 - **IEP version:** 1.17.15 (latest 1.17.x certified on OCP 4.16 per Red Hat
@@ -22,6 +25,26 @@ validated end-to-end across multiple wipe-and-rebuild iterations.
 - **Cilium config:** `kubeProxyReplacement: "true"`, pod CIDR `10.253.0.0/16`
   (non-overlapping with OVN's `10.128.0.0/14`)
 
+### Fresh-install lab (`tools-upi-install/`, **validated end-to-end 2026-05-30**)
+
+- **OCP version:** 4.20.x UPI, `platform: none`, `networkType: Cilium`
+- **IEP version:** 1.18.x (latest 1.18 — 4.20-certified per
+  [Red Hat 5436171](https://access.redhat.com/articles/5436171))
+- **Topology:** 3 masters + 3 workers + 1 bootstrap, `*-i-N (install)` in vSphere
+- **Coexistence:** shares the migration lab's bastion, Nexus, dnsmasq/TFTP and
+  httpd; runs its own `haproxy-install.service` bound to `192.168.39.30`
+- **Pod / service CIDRs:** `10.244.0.0/14` / `172.31.0.0/16` (non-overlapping
+  with migration cluster)
+- **Status:** **validated end-to-end on 2026-05-30**. OCP 4.20.24 installed cleanly first try (no MCP autofix needed); CLife auto-upgraded to 1.18.10-cee.1 via OLM; Timescape 1.18.8 deployed via the public Helm chart (devhub entitlement gap pivoted to Helm); 10k flows/s sustained; UI Route HTTP 200; hubble CLI 1.18.6 + Timescape 1.18.8 queries clean.
+
+## Compatibility references
+
+| Topic | Authoritative link |
+|---|---|
+| OCP support phases (Full / Maintenance / EUS) | https://access.redhat.com/support/policy/updates/openshift |
+| IEP CNI certification matrix | https://access.redhat.com/articles/5436171 |
+| Isovalent install procedure | https://docs.isovalent.com/iep/latest/ink/install/openshift.html (login) |
+
 ## Repository layout
 
 ```
@@ -29,9 +52,10 @@ validated end-to-end across multiple wipe-and-rebuild iterations.
 ├── README.md                              ← this file
 ├── CLAUDE.md                              ← assistant context (project conventions)
 ├── guide/
-│   ├── OCP_IEP_Migration_Guide.md         ← step-by-step runbook (install → migrate → cleanup)
-│   └── OCP_IEP_Timescape_Guide.md         ← follow-up: persistent flow observability
-├── tools-upi-migrate/                     ← all scripts (single source of truth)
+│   ├── OCP_IEP_Migration_Guide.md         ← migration lab runbook (install → migrate → cleanup)
+│   ├── OCP_IEP_Timescape_Guide.md         ← migration-cluster follow-up: persistent flow observability
+│   └── OCP_IEP_Install_Guide.md           ← fresh-install lab (OCP 4.20 + IEP 1.18, inline Timescape)
+├── tools-upi-migrate/                     ← migration lab scripts (single source of truth)
 │   ├── lab-config.sh                      ← edit «CHANGE» items before anything else
 │   ├── setup-artifactory.sh               ← Nexus pull-through proxy
 │   ├── setup-haproxy.sh                   ← API/MCS/Ingress/Nexus load balancing
@@ -52,25 +76,47 @@ validated end-to-end across multiple wipe-and-rebuild iterations.
 │   ├── all.sh                             ← convenience: run install end-to-end
 │   ├── delete-vms.sh                      ← teardown
 │   └── govc-env.sh                        ← sourced GOVC_* exports
+├── tools-upi-install/                     ← fresh-install lab scripts (parallel to tools-upi-migrate)
+│   ├── lab-config.sh                      ← « CHANGE » items + reuses Nexus from migration lab
+│   ├── setup-haproxy.sh                   ← second HAProxy instance on .30 (untouched migration LB)
+│   ├── setup-httpd.sh                     ← adds /ignition-install/ + /rhcos-install/ aliases
+│   ├── download-rhcos.sh                  ← RHCOS 4.20 ISO + rootfs
+│   ├── setup-nfs.sh                       ← separate /srv/nfs/openshift-install export
+│   ├── gen-ignition.sh                    ← networkType: Cilium baked in, CLife manifests in manifests/
+│   ├── recreate-vms.sh, upload-iso.sh, setup-pxe.sh, pxe-install-and-boot.sh   ← install path
+│   ├── monitor-install.sh                 ← bootstrap → CSRs → install-complete
+│   ├── remove-bootstrap-from-haproxy.sh   ← edits haproxy-install.cfg only
+│   ├── get-kubeconfig.sh, get-console-creds.sh   ← post-install helpers
+│   ├── setup-storage.sh                   ← nfs-storage-install StorageClass in the cluster
+│   ├── start-vms.sh, delete-vms.sh, govc-env.sh
+│   └── (no patch-cilium-k8s-host.sh — not needed for fresh KPR=true install)
 ├── doc-sources/                           ← upstream Isovalent reference docs
-│   ├── iep-installation.txt
+│   ├── iep-installation.txt               ← (older 1.17-era install reference)
 │   ├── iep-migration.txt
 │   ├── iep-claude-guide.txt
+│   ├── iep-1.18-openshift-install.txt     ← fresh-fetched 1.18 OCP install procedure
+│   ├── iep-1.18-timescape-on-openshift.txt ← fresh-fetched 1.18 Timescape operator procedure
 │   └── OCP_AirGapped_Deployment_Guide.md
-├── ocp-upi-migrate/                       ← openshift-install working dir (generated)
-│   ├── auth/kubeconfig                    ← cluster kubeconfig
+├── ocp-upi-migrate/                       ← migration lab openshift-install working dir (generated)
+│   ├── auth/kubeconfig                    ← migration cluster kubeconfig
 │   ├── auth/kubeadmin-password
-│   └── clife/                             ← downloaded + customized CLife manifests
-├── pull-secret.json                       ← Red Hat pull secret (your file)
-├── pull-secret-with-art.json              ← merged pull secret incl. Nexus creds
-├── clife-v1.17.15.tar.gz                  ← downloaded CLife tarball
-└── networkpolicies-backup.yaml            ← Section 5.4 backup
+│   └── clife/                             ← downloaded + customized CLife 1.17 manifests
+├── ocp-upi-install/                       ← install lab openshift-install working dir (generated)
+│   ├── auth/kubeconfig                    ← install cluster kubeconfig
+│   └── clife/                             ← downloaded + customized CLife 1.18 manifests
+├── pull-secret.json                       ← Red Hat pull secret (your file — shared)
+├── pull-secret-with-art.json              ← merged pull secret incl. Nexus creds (shared)
+├── clife-v1.17.15.tar.gz                  ← migration lab CLife tarball
+├── clife-v1.18.9.tar.gz                   ← install lab CLife tarball
+└── networkpolicies-backup.yaml            ← migration Section 5.4 backup
 ```
 
 ## Quick start
 
+### Migration lab (OCP 4.16 + IEP 1.17 via OVN→Cilium)
+
 ```bash
-# 1. Edit lab variables — all « CHANGE » items in lab-config.sh
+# 1. Edit lab variables
 vi /root/tools-upi-migrate/lab-config.sh
 source /root/tools-upi-migrate/lab-config.sh
 
@@ -90,31 +136,52 @@ cd /root/tools-upi-migrate
 ./monitor-install.sh     # waits for install-complete
 ./get-console-creds.sh   # show console URL + kubeadmin password
 
-# 4. Deploy a test workload + run pre-migration gates
-# (see Section 4 and Section 5 of the guide)
-
-# 5. Customize CLife manifests
-# (Section 6 of the guide — three files in ${CLIFE_DIR})
-
+# 4. Deploy a test workload + run pre-migration gates (Sections 4, 5 of the guide)
+# 5. Customize CLife manifests (Section 6 of the guide)
 # 6. Migrate to Cilium
 ./do-migration.sh -y     # full Phase 1-6 unattended
-
-# 7. Approve OLM InstallPlan and verify
-# (Section 8 of the guide)
-
-# 8. Post-migration cleanup
-# (Section 9 of the guide)
+# 7. Approve OLM InstallPlan and verify (Section 8)
+# 8. Post-migration cleanup (Section 9)
 ```
 
-The full runbook with commands, expected output, and troubleshooting is
-[`guide/OCP_IEP_Migration_Guide.md`](guide/OCP_IEP_Migration_Guide.md). See
-**Section 1.4 — Scripts Overview** in the guide for the script-by-script
-ordering with cross-references to the guide sections that explain each step.
+Full runbook: [`guide/OCP_IEP_Migration_Guide.md`](guide/OCP_IEP_Migration_Guide.md).
+Follow-up Timescape: [`guide/OCP_IEP_Timescape_Guide.md`](guide/OCP_IEP_Timescape_Guide.md).
 
-After the migration is complete, the **follow-up guide
-[`guide/OCP_IEP_Timescape_Guide.md`](guide/OCP_IEP_Timescape_Guide.md)** adds
-**Hubble Timescape** — persistent flow observability backed by ClickHouse,
-queryable via the `hubble` CLI and the Hubble Timescape UI.
+### Fresh-install lab (OCP 4.20 + IEP 1.18, Cilium baked in)
+
+Assumes the migration lab's bastion services (Nexus, dnsmasq, httpd) are
+already running. The install lab adds its own pieces around them.
+
+```bash
+# 1. Edit install-lab variables (most defaults are fine)
+vi /root/tools-upi-install/lab-config.sh
+source /root/tools-upi-install/lab-config.sh
+
+# 2. Bastion additions
+cd /root/tools-upi-install
+./setup-haproxy.sh       # second HAProxy instance bound to 192.168.39.30
+./setup-httpd.sh         # /ignition-install/ + /rhcos-install/ aliases
+./download-rhcos.sh      # RHCOS 4.20 ISO + rootfs
+./setup-nfs.sh           # /srv/nfs/openshift-install export
+
+# 3. Install OCP 4.20 with Cilium baked in
+./gen-ignition.sh        # networkType: Cilium, CLife manifests in manifests/
+./recreate-vms.sh        # 7 VMs in vSphere folder OCP-Install
+./upload-iso.sh
+./setup-pxe.sh           # additive: per-MAC + dhcp-host entries only
+./pxe-install-and-boot.sh
+./monitor-install.sh
+./get-console-creds.sh
+
+# 4. Approve CLife OLM InstallPlan (Section 6 of the guide)
+# 5. Verify (Section 7)
+# 6. (Optional) Bookinfo sanity workload (Section 8)
+# 7. Hubble Timescape via the IEP 1.18 operator (Section 9)
+./setup-storage.sh       # nfs-storage-install SC
+# ... then apply Timescape CatalogSource + Subscription + TimescapeConfig per Section 9
+```
+
+Full runbook: [`guide/OCP_IEP_Install_Guide.md`](guide/OCP_IEP_Install_Guide.md).
 
 ## Validated procedure
 

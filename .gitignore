@@ -39,9 +39,11 @@ CLAUDE.md
 .ssh/**
 .vscode-server/**
 ocp-upi-migrate/**
+ocp-upi-install/**
 clife-known-good/**
 clife-pre-build-4/**
 doc-sources/**
 .config/**
 
 
+secrets-for-lab.sh

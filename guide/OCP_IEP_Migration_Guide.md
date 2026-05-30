@@ -55,6 +55,7 @@ This guide walks through a complete lab scenario:
   - [6.3 Configure the CLife Controller Manager](#63-configure-the-clife-controller-manager)
   - [6.4 Configure the OLM Subscription](#64-configure-the-olm-subscription)
 - [7. Migration Procedure](#7-migration-procedure)
+  - [Section 7.0 — Pre-migration backups & rollback boundaries (design proposal — not tested)](#section-70--pre-migration-backups--rollback-boundaries-design-proposal--not-tested)
   - [Phase 1 — Disable the Cluster Network Operator](#phase-1--disable-the-cluster-network-operator)
   - [Phase 2 — Pause the Machine Config Operator](#phase-2--pause-the-machine-config-operator)
   - [Phase 3 — Switch the Network Plugin](#phase-3--switch-the-network-plugin)
@@ -85,9 +86,15 @@ This guide walks through a complete lab scenario:
 
 > **Kernel requirement:** Cilium requires the standard RHCOS kernel. The Real-Time (RT) kernel disables eBPF program types required by Cilium. If any node shows `rt` in its kernel version, switch it to the standard kernel via MachineConfig before proceeding.
 
+### OpenShift support policy
+
+OpenShift minor releases progress through Full Support, Maintenance Support, and Extended Update Support phases. Always check the current support phase for your target OCP minor at the canonical Red Hat page before planning a migration: [https://access.redhat.com/support/policy/updates/openshift](https://access.redhat.com/support/policy/updates/openshift). Migrating onto an OCP version that is already out of Full Support shortens the window in which Red Hat will accept tickets, even though the migration itself is Isovalent-supported.
+
 ### IEP / OpenShift Compatibility Matrix
 
-Source of truth: Red Hat Customer Portal article 5436171, *OpenShift CNI Plug-in Support* (Cisco Isovalent section). The product was renamed from **Isovalent Enterprise for Cilium** to **Isovalent Networking for Kubernetes** starting at 1.17.
+**Source of truth — always check the official article first:** [Red Hat Customer Portal article 5436171 — *OpenShift CNI Plug-in Support*](https://access.redhat.com/articles/5436171) (Cisco Isovalent section). The table below is a snapshot; Red Hat updates the matrix when new IEP minors are certified or older OCP minors go end-of-support, so consult the article before committing to a version.
+
+The product was renamed from **Isovalent Enterprise for Cilium** to **Isovalent Networking for Kubernetes** starting at 1.17.
 
 | Product name | IEP version | Install methods | Certified OCP versions | Tests passed |
 |---|---|---|---|---|
@@ -1202,6 +1209,227 @@ yq '.spec.config.env' ${SUBSCRIPTION_FILE}
 >
 > These all clear once the corresponding nodes reboot in Phase 6 and come back on Cilium. Do **not** treat them as a reason to roll back.
 
+### Section 7.0 — Pre-migration backups & rollback boundaries (design proposal — **not tested**)
+
+> **⚠️ This section is a thought exercise, not validated procedure.** The strategy below has been reasoned through but **not executed in the lab**. Red Hat and Isovalent both classify the OVN→Cilium migration as a **one-way maintenance window**; the only fully supported recovery is "fix forward." Treat what follows as planning input for a production migration, not a guaranteed escape hatch. Test every step in a non-production lab against your specific OCP version and storage substrate before relying on it.
+
+#### Rollback feasibility by phase
+
+| Stopped/failed at | Cluster state | Rollback effort | Feasibility |
+|---|---|---|---|
+| **Phase 1** (CNO disabled, scaled to 0, applied-cluster cm deleted) | OVN still running on nodes; CNO not reconciling | Scale CNO back to 1, remove the CVO override, let CNO recreate `applied-cluster`. | ✅ Reversible — node network plane unchanged |
+| **Phase 2** (MCPs paused) | Same | Unpause MCPs. | ✅ Fully reversible |
+| **Phase 3** (network.config patched to `networkType: Cilium`) | Patch is live in the API but nothing reconciles because CNO is scaled to 0 and MCPs are paused | Patch back to OVNKubernetes + original CIDRs, then unpause MCPs and scale CNO. | ⚠️ Reversible-ish — only because Phase 1+2 prevented anything from happening |
+| **Phase 4** (CLife + CiliumConfig + Multus repointed) | Cilium DS Running but nodes still on OVN. Multus's `readinessindicatorfile` now points at `05-cilium.conflist` (doesn't exist on disk yet). Multus DS pods NotReady. | Patch Multus CM back to `10-ovn-kubernetes.conf`, restart Multus DS, delete CLife resources, revert Phase 3 patch, unpause MCPs, scale CNO back. **Pods will have been evicted or restarted.** | ⚠️ Brittle — cluster has been mutated, node disks haven't. Recovery is plausible but requires precise undo |
+| **Phase 5** (kube-apiserver pods restarted, MCO restarted, CNO scaled up + CVO override cleared) | Cluster operators reconciling toward `networkType: Cilium`. CNO is now Managed and rejects reversing `networkType`. | Effectively nothing supported. | ❌ Don't try |
+| **Phase 6** (MCPs unpaused, nodes rebooting and switching CNI to Cilium) | First node already booted with Cilium-rendered MachineConfig. OVN's br-int / br-ex torn down on first boot. | OVN's data plane destroyed on rebooting nodes. Reverse-migration is not supported. | ❌ Catastrophic to attempt |
+
+**Translation:** safe to abort cleanly through Phase 2 (preferable), recoverable but ugly through Phase 4 (only if you really need to), destructive once Phase 5 starts.
+
+#### Four backup layers (proposed)
+
+| Layer | Cost | When | What it gets you |
+|---|---|---|---|
+| 1 — etcd backup | Cheap (one command) | T-30 min and T-5 min before Phase 1 | API state restore. Covers everything through Phase 4. |
+| 2 — Velero / OADP of all workload namespaces | Medium (depends on PVC sizes) | T-30 min before Phase 1 | Only path back to stateful workloads if you have to reinstall. |
+| 3 — install-config + ignition + MachineConfig archive | Cheap (one tarball) | T-30 min before Phase 1 | Required for any rebuild-from-scratch scenario. |
+| 4 — Node-disk backups | Expensive on bare metal | Drain windows the day before | Only true rollback past Phase 4. **Mandatory for masters in production; optional for workers.** |
+
+#### Layer 1 — etcd backup (always do this)
+
+Single command, official OCP procedure:
+
+```bash
+oc debug node/master-m-0 -- chroot /host /usr/local/bin/cluster-backup.sh /home/core/etcd-backup
+scp -r core@192.168.39.21:/home/core/etcd-backup/ /backup/pre-migration-$(date +%F-%H%M)/
+```
+
+Produces:
+- `snapshot_<ts>.db` — the etcd snapshot
+- `static_kuberesources_<ts>.tar.gz` — static pod manifests for kube-apiserver, kube-controller-manager, etcd
+
+**Restores:** the control-plane state at the moment of capture. Kube-apiserver, scheduler, etcd, controllers come back to that point. Workloads stay running on nodes if those nodes are still up (kubelet keeps containers running independent of the API).
+
+**Does NOT restore:** CNI state on nodes, `/etc/kubernetes/*` rendered MachineConfigs, PVC contents.
+
+**Where it falls short for rollback:** if Phase 6 rebooted a master onto a Cilium-rendered MachineConfig that tore down OVS bridges, restoring etcd alone leaves the master booted from a Cilium-state disk. Networking stays broken until you ALSO rewind the node's disk.
+
+#### Layer 2 — Velero / OADP for workload state
+
+Install the OADP operator from OperatorHub, configure a `BackupStorageLocation` pointing at MinIO or an S3 bucket, then:
+
+```bash
+# Back up all non-system namespaces with their PVC snapshots
+velero backup create pre-migration \
+  --include-namespaces='*' \
+  --exclude-namespaces='openshift-*,kube-*,default' \
+  --snapshot-volumes
+```
+
+Restore:
+```bash
+velero restore create --from-backup pre-migration
+```
+
+**Why this matters for migration:** the migration itself doesn't lose PVC data — PVCs are backed by your storage substrate, not the CNI. But if you have to reinstall a master and rejoin it, or wipe and reinstall a worker, Velero is the only way to get workloads back without redeploying from scratch.
+
+#### Layer 3 — install-config + ignition + MachineConfig archive
+
+```bash
+tar czf /backup/ocp-install-state-$(date +%F).tgz \
+  /root/ocp-upi-migrate/install-config.yaml.bak \
+  /root/ocp-upi-migrate/manifests \
+  /root/ocp-upi-migrate/openshift \
+  /root/ocp-upi-migrate/auth \
+  /root/ocp-upi-migrate/*.ign \
+  /root/tools-upi-migrate/lab-config.sh
+oc get mc -o yaml  > /backup/machineconfigs-pre-migration-$(date +%F).yaml
+oc get mcp -o yaml > /backup/machineconfigpools-pre-migration-$(date +%F).yaml
+oc get network.config cluster -o yaml   > /backup/network-config-pre-migration.yaml
+oc get network.operator cluster -o yaml > /backup/network-operator-pre-migration.yaml
+```
+
+If you have to do a full reinstall (worst case), these get the same cluster shape back. **For the fresh-install lab, this is what you'd use as your "rollback" — wipe nodes, run `gen-ignition.sh` from the archived config, redo PXE install.**
+
+#### Layer 4 — Node-disk backups (the bare-metal-specific part)
+
+Bare metal can't take an atomic VM snapshot. Three approaches, depending on what your hardware supports:
+
+##### Option A — Drain + dd to NFS (works on anything, slowest)
+
+For each master, one at a time, immediately before Phase 1:
+
+```bash
+oc adm cordon master-m-0
+oc adm drain master-m-0 --ignore-daemonsets --delete-emptydir-data --force
+
+# Power off via IPMI / Redfish / BMC console
+ipmitool -H bmc-master-m-0 -U admin -P <pass> power off
+
+# Boot the node from a rescue ISO with NFS access:
+mkdir /mnt/backup
+mount bastion:/srv/backup /mnt/backup
+dd if=/dev/sda bs=64M status=progress | xz -1 > /mnt/backup/master-m-0.img.xz
+sync && poweroff
+
+# Power back on; uncordon
+ipmitool -H bmc-master-m-0 -U admin -P <pass> power on
+oc adm uncordon master-m-0
+```
+
+- ~120 GiB disk → ~30-50 GiB compressed → 15-30 min per node
+- ×3 masters = ~1-2 hours of staggered downtime
+- Restore is dd in reverse — equally slow
+- Application-consistent only because you drained first
+
+**For production:** do this for the 3 masters. Skip the workers — they're easier to rebuild via `recreate` than restore.
+
+##### Option B — LVM thin snapshots (requires install-time disk layout planning)
+
+RHCOS makes `/var` the writable partition; `/usr` etc. are immutable via rpm-ostree. If you've laid out `/var` on LVM thin at install time (via custom `MachineConfig`), you can snapshot online:
+
+```bash
+oc debug node/master-m-0 -- chroot /host \
+  lvcreate --snapshot --name var-pre-migration --size 20G /dev/mapper/coreos-luks-root-nocrypt
+```
+
+Restore with `lvconvert --merge` + reboot. Application-consistent only if you drain first.
+
+**Caveat:** RHCOS default layout does NOT put `/var` on LVM thin. Adding this is a Day 0 decision, not retrofittable. The fresh-install lab is the right place to add this if you want it.
+
+##### Option C — Storage-substrate snapshots (Ceph RBD, NetApp, Pure, etc.)
+
+If your nodes' OS disks come from a storage array, snapshot at the array level:
+
+```bash
+# Ceph RBD example
+rbd snap create ocp-pool/master-m-0@pre-migration
+rbd snap create ocp-pool/master-m-1@pre-migration
+rbd snap create ocp-pool/master-m-2@pre-migration
+```
+
+**Fastest by far** (seconds), zero local-disk overhead, crash-consistent unless you drain + sync first. **Gold standard for bare-metal OCP backed by an enterprise SAN.** Requires boot-from-SAN; most bare-metal OCP installs are local-disk and this isn't available.
+
+#### Proposed pre-migration preflight (untested)
+
+```bash
+# T-30 min: full preflight
+BACKUP_DIR=/backup/pre-migration-$(date +%F-%H%M)
+mkdir -p ${BACKUP_DIR}
+
+# Layer 1: etcd
+oc debug node/master-m-0 -- chroot /host /usr/local/bin/cluster-backup.sh /home/core/etcd-backup
+scp -r core@192.168.39.21:/home/core/etcd-backup/ ${BACKUP_DIR}/etcd/
+
+# Layer 2: Velero (assumes OADP installed)
+velero backup create pre-migration-$(date +%F-%H%M) \
+  --include-namespaces='*' --exclude-namespaces='openshift-*,kube-*,default' \
+  --snapshot-volumes
+
+# Layer 3: install state
+tar czf ${BACKUP_DIR}/install-state.tgz \
+  /root/ocp-upi-migrate/{install-config.yaml.bak,manifests,openshift,auth,*.ign} \
+  /root/tools-upi-migrate/lab-config.sh
+oc get mc,mcp,network.config,network.operator -o yaml > ${BACKUP_DIR}/cluster-state.yaml
+
+# Layer 4: per-master disk image (do this the DAY BEFORE for staggered downtime)
+# Repeat for each master separately.
+# See Layer 4 Option A above for the actual commands.
+
+# T-5 min: refresh etcd backup (cheapest, most recent state)
+oc debug node/master-m-0 -- chroot /host /usr/local/bin/cluster-backup.sh /home/core/etcd-backup-final
+scp -r core@192.168.39.21:/home/core/etcd-backup-final/ ${BACKUP_DIR}/etcd-final/
+```
+
+#### Proposed restore decision tree
+
+```
+Has any master rebooted into a Cilium-rendered MachineConfig yet?
+├─ No (you're still in Phase 1-4)
+│   └─ Restore = revert API patches manually:
+│       1. Patch network.config back to OVNKubernetes + original CIDRs
+│       2. Patch Multus CM back to 10-ovn-kubernetes.conf, restart Multus DS
+│       3. Delete CLife namespace + manifests
+│       4. Scale CNO back to 1; clear CVO override
+│       5. Unpause MCPs
+│       6. Test pod connectivity; if broken, restore etcd from snapshot
+│
+└─ Yes (Phase 6 started)
+    ├─ Do you have node-disk backups of the affected master(s)?
+    │   ├─ Yes
+    │   │   └─ For each affected master:
+    │   │       1. Drain, power off via BMC
+    │   │       2. dd the backup image back onto the disk (rescue boot)
+    │   │       3. Power on; node rejoins
+    │   │       4. Restore etcd from the matching-time snapshot
+    │   │       5. Restart kube-apiserver pods, MCO
+    │   │       ~1-2 hours per node.
+    │   └─ No
+    │       └─ Fix-forward is the only option.
+    │          Complete the migration to Cilium, then triage broken workloads.
+```
+
+#### What I'd actually recommend
+
+The strongest mitigation is **testing the migration in a lab against an identical OCP version + MachineConfig set + workload mix before doing it on production**. Every gotcha in this guide (IDMS+ITMS split, OLM unpack race, CLife ConfigMap race, etc.) would have been a disaster on production if discovered there. The lab caught all of them at zero risk. Backups are insurance against a migration you've never tested; the cheaper insurance is to test it.
+
+For a production migration on bare metal, the realistic strategy:
+
+1. **Always do:** Layer 1 (etcd, twice) + Layer 2 (Velero) + Layer 3 (install archive)
+2. **For masters in production:** Layer 4 Option A (dd) — overnight, before the migration window
+3. **If you have SAN-backed boot disks:** Layer 4 Option C (storage snapshots) for all 6 nodes
+4. **Workers:** accept that they're rebuildable, skip per-node backups, lean on Velero
+
+#### Open questions to validate before relying on this
+
+- Does etcd restore actually work cleanly through a Phase-3 abort? Untested.
+- Does the Multus CM revert (Phase 4 rollback) cleanly restore OVN traffic, or do Multus DS pods need additional intervention? Untested.
+- Will dd-based master restore re-join the cluster cleanly, or does the on-disk certificate state collide with what etcd thinks the master should be? Untested.
+
+These need a dedicated rollback-test run in the lab. Suggested as a follow-up exercise after the fresh-install lab is validated.
+
+---
+
 ### Phase 1 — Disable the Cluster Network Operator
 
 The Cluster Network Operator (CNO) manages OVN-Kubernetes. It must be stopped first to prevent it from reverting the network configuration changes we are about to make.
@@ -1721,6 +1949,7 @@ oc get networkpolicy -A
 After the cluster is migrated and healthy:
 
 - **[Hubble Timescape deployment](OCP_IEP_Timescape_Guide.md)** — add persistent flow observability on top of the migrated cluster. Standalone ClickHouse-backed Timescape with NFS-on-bastion storage, Stream API from Cilium, CLI + UI access. ~30 min end-to-end.
+- **[Fresh-install lab](OCP_IEP_Install_Guide.md)** — parallel guide that installs OCP 4.20 + IEP 1.18 from scratch (Cilium baked in at bootstrap time, no OVN) on a second cluster sharing the same bastion. Useful to compare the fresh-install flow against the migration path. Inline Timescape section.
 
 ---
 

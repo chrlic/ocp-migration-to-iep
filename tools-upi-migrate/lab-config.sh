@@ -45,15 +45,15 @@ export ARTIFACTORY_HOST=artifactory.${CLUSTER_NAME}.${BASE_DOMAIN}
 export ARTIFACTORY_PORT=8443
 export ARTIFACTORY_URL="https://${ARTIFACTORY_HOST}:${ARTIFACTORY_PORT}"
 export ARTIFACTORY_USER=admin                               # « CHANGE »
-export ARTIFACTORY_PASS=Passw0rd.                           # « CHANGE »
+export ARTIFACTORY_PASS=Passw0rd.                           # « CHANGE » Set by setup-artifactory.sh during Nexus bring-up (this lab owns it)
 export ARTIFACTORY_OCP_REPO=ocp-images                     # Nexus group repo name
 export ARTIFACTORY_DATA_DIR=/home/nexus-data               # Nexus data directory (was Artifactory)
 
 # Docker Hub Personal Access Token for the remote-dockerhub proxy
 # (anonymous PA-IP is rate-limited to 100 pulls/6h — exhausted in a single install)
 # Generate at https://hub.docker.com/settings/security with `Public Repo Read` scope.
-export DOCKERHUB_USER=***                               # « CHANGE »
-export DOCKERHUB_PASS=***       # « CHANGE »
+export DOCKERHUB_USER=                                      # « CHANGE » Docker Hub username for the PAT
+export DOCKERHUB_PASS=                                      # « CHANGE » Docker Hub Personal Access Token (Public Repo Read scope)
 
 # --- Red Hat Pull Secret ---
 export PULL_SECRET_FILE=/root/pull-secret.json              # « CHANGE » Download from console.redhat.com
@@ -83,13 +83,13 @@ export CILIUM_CLUSTER_CIDR=10.253.0.0/16
 export CILIUM_HOST_PREFIX=24
 
 # --- vSphere ---
-export VCENTER_HOST=***               # « CHANGE »
-export VCENTER_USER=***                               # « CHANGE »
-export VCENTER_PASS=***                              # « CHANGE »
+export VCENTER_HOST=                                        # « CHANGE » vCenter FQDN, e.g. prg-vcenter.cisco.com
+export VCENTER_USER=                                        # « CHANGE » vCenter username
+export VCENTER_PASS=                                        # « CHANGE » vCenter password
 export VCENTER_DATACENTER=PRG-LAB                           # « CHANGE »
 export VCENTER_DATASTORE="PRG-LAB-HX DS1"                   # « CHANGE »
 export VCENTER_FOLDER="/PRG-LAB/vm/mdivis/OCP-Migrate"      # « CHANGE » separate folder from existing lab
-export VCENTER_HOST_TARGET=***           # « CHANGE » ESXi host
+export VCENTER_HOST_TARGET=                                 # « CHANGE » ESXi host, e.g. prg-lab-hx3.cisco.com
 export VCENTER_RESOURCE_POOL="/PRG-LAB/host/PRG-LAB-HX/Resources" # « CHANGE »
 export VCENTER_NETWORK="PRG-LAB/PRG-DC-39"                  # « CHANGE » DVS-relative port group path (under /<DC>/network/) for 192.168.39.0/24
 
