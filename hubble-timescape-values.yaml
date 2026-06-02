@@ -1,4 +1,19 @@
+# Hubble Timescape — MinIO object-store fan-in (replaces Stream API)
+# Namespace: hubble-timescape-install   Chart: 1.18.8
+#
+# NOTE: overrideClusterName below does NOT populate the flow/source|destination/
+# cluster_name columns in ClickHouse — those are stamped by the SOURCE Cilium
+# agent's cluster-name. To get per-cluster attribution, set cluster.name/cluster.id
+# in each source CiliumConfig and force `oc -n cilium rollout restart ds/cilium`.
+# See OCP_IEP_Timescape_Multicluster.md §V.1 + §W.
+
+# --- ClickHouse: bumped for fan-in (ingest + query concurrently on a backlog) ---
 clickhouse:
+  # Per-query memory cap below the pod limit so a wide query fails gracefully
+  # with a CH over-commit error instead of OOM-killing the pod (base guide §F.5).
+  userProfiles:
+    readOnly:
+      maxMemoryUsage: 4294967296          # 4 GiB per read query (< 8Gi pod limit)
   cluster:
     enabled: true
     resources:
@@ -7,18 +22,41 @@ clickhouse:
         memory: "2Gi"
       limits:
         cpu: "2"
-        memory: "4Gi"
+        memory: "8Gi"                      # was 4Gi — too small once a backlog + ingest coexist
     volumes:
       data:
         size: 50Gi
-        storageClassName: nfs-storage
+        storageClassName: nfs-storage-install
 
+# --- Ingester: read flows from MinIO instead of the Stream API ---
 ingester:
+  enabled: true
+  extraEnv:
+    - name: AWS_ACCESS_KEY_ID
+      valueFrom:
+        secretKeyRef:
+          name: hubble-timescape-s3-creds
+          key: AWS_ACCESS_KEY_ID
+    - name: AWS_SECRET_ACCESS_KEY
+      valueFrom:
+        secretKeyRef:
+          name: hubble-timescape-s3-creds
+          key: AWS_SECRET_ACCESS_KEY
+  # Mutually exclusive with config.buckets below — must be empty.
   bucket:
-    uri: "file:///var/run/hubble-timescape/flows"
-  server:
-    grpc:
-      enabled: true
+    uri: ""
+
+config:
+  # One entry per source cluster. ocp-install is the first (loopback) source.
+  buckets:
+    - uri: "s3://timescape?endpoint=http://192.168.39.20:9000&disable_https=true&use_path_style=true&region=us-east-1"
+      overrideClusterName: "ocp-install"
+      flows:
+        # Uploaded rotated files are named "<node>-hubble-<ts>.log.gz" — match
+        # that, NOT the literal "hubble.log" (which is the live, un-rotated file).
+        pattern: "hubble-.*\\.log\\.gz"
+      paths:
+        - prefixPattern: "ocp-install/%Y/%m/%d"
 
 ui:
   enabled: true

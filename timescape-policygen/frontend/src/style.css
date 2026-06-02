@@ -1,0 +1,71 @@
+:root {
+  --bg: #0f1419;
+  --panel: #1a212b;
+  --panel-2: #232c38;
+  --accent: #36c5b0;
+  --accent-2: #2a9d8f;
+  --text: #e3e8ef;
+  --muted: #8a97a8;
+  --border: #2c3744;
+  --danger: #ff6b6b;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+.layout { display: grid; grid-template-columns: 340px 1fr; height: 100vh; }
+.panel {
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  padding: 20px;
+  overflow-y: auto;
+}
+.panel h1 { font-size: 18px; margin: 0 0 2px; color: var(--accent); }
+.sub { color: var(--muted); font-size: 12px; margin: 0 0 18px; }
+label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 4px; }
+input[type='text'], input[type='number'], select {
+  width: 100%; padding: 8px; margin-top: 4px;
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px; font-size: 13px;
+}
+fieldset.scope { border: 1px solid var(--border); border-radius: 6px; margin: 14px 0; padding: 8px 10px; }
+fieldset.scope legend { color: var(--muted); font-size: 12px; padding: 0 4px; }
+label.radio, label.check { display: flex; align-items: center; gap: 6px; color: var(--text); margin: 6px 0; }
+label.radio input, label.check input { width: auto; margin: 0; }
+.workloads { margin: 12px 0; }
+.workloads h4 { font-size: 13px; margin: 4px 0; }
+.workloads ul { list-style: none; padding: 0; margin: 0; max-height: 240px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; }
+.workloads li { padding: 6px 8px; font-size: 12px; cursor: pointer; border-bottom: 1px solid var(--border); }
+.workloads li:hover { background: var(--panel-2); }
+.workloads li.sel { background: var(--accent-2); color: #04120f; }
+.workloads li .kind { display: inline-block; min-width: 78px; color: var(--muted); font-size: 11px; }
+.workloads li.sel .kind { color: #04120f; }
+.workloads li.empty { color: var(--muted); cursor: default; font-style: italic; }
+.count { color: var(--muted); font-weight: normal; font-size: 11px; }
+button {
+  margin-top: 16px; padding: 9px 14px; width: 100%;
+  background: var(--accent); color: #04120f; border: none; border-radius: 6px;
+  font-weight: 600; cursor: pointer; font-size: 13px;
+}
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+.yaml-head button, .yaml-head + div button { width: auto; margin: 0 0 0 8px; padding: 5px 10px; }
+.error { color: var(--danger); font-size: 12px; margin-top: 10px; }
+.content { padding: 20px; overflow-y: auto; }
+.placeholder { color: var(--muted); max-width: 480px; margin-top: 40px; line-height: 1.6; }
+.yaml-head { display: flex; justify-content: space-between; align-items: center; }
+.yaml pre {
+  background: #0b0f14; border: 1px solid var(--border); border-radius: 8px;
+  padding: 16px; overflow-x: auto; font-size: 12.5px; line-height: 1.5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.hint { color: var(--muted); font-size: 12px; }
+.hint code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
+.edges { margin-top: 24px; display: grid; gap: 20px; }
+.edge-table h4 { font-size: 13px; margin: 0 0 8px; }
+.edge-table table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.edge-table th, .edge-table td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border); }
+.edge-table th { color: var(--muted); font-weight: 600; }
+.edge-table td.num { text-align: right; color: var(--muted); }

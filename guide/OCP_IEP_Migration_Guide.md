@@ -852,6 +852,41 @@ which prevents MCS from ever starting on `:22623`. Masters then PXE into the liv
 
 **Containers/image cert trust on CentOS 9.** Skopeo/podman on CentOS Stream 9 don't fully honor user-added CAs in the system trust pem bundle (OpenSSL 3.x trust-marker quirk). `setup-artifactory.sh` works around this by copying the Nexus CA into `/etc/containers/certs.d/<host>:<port>/ca.crt` so the containers/image library reads it directly. Symptom of the missing copy: skopeo gets `x509: certificate signed by unknown authority` even though `curl --cacert` succeeds.
 
+**Expired Docker Hub PAT → `manifest unknown` for all `docker.io` images (long after a working install).** `setup-artifactory.sh` authenticates `remote-dockerhub` with `DOCKERHUB_USER`/`DOCKERHUB_PASS` (a PAT) to dodge the anonymous 100-pulls/6h limit. Docker Hub PATs **expire**. When the PAT expires, Docker Hub rejects the proxy's token request and Nexus surfaces it to clients as `reading manifest … : manifest unknown` — *not* an auth error — so it looks like the image or the group is broken. Tell-tale sign that it's the PAT and not the group: the standalone proxy fails too, while Docker Hub upstream is reachable from the bastion:
+```bash
+source /root/tools-upi-migrate/lab-config.sh
+# upstream reachable? (uses the corporate WSA proxy)
+source /etc/profile.d/proxy.sh
+T=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/busybox:pull" | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+curl -s -o /dev/null -w "upstream: HTTP %{http_code}\n" -H "Authorization: Bearer $T" \
+  https://registry-1.docker.io/v2/library/busybox/manifests/latest          # 200 = upstream fine
+# proxy serving it? (no corporate proxy — talk to local Nexus)
+curl -s -o /dev/null -w "nexus proxy: HTTP %{http_code}\n" --noproxy "*" \
+  -u "${ARTIFACTORY_USER}:${ARTIFACTORY_PASS}" \
+  http://localhost:8081/repository/remote-dockerhub/v2/library/busybox/manifests/latest  # 200 = PAT OK; manifest_unknown/401 = PAT expired
+```
+**Fix — update the PAT via ExtDirect** (the REST repository-update API was removed for credentials in Nexus 3.71+; the `read`→mutate→`update` RPC is the supported path, same channel as the HTTP-proxy settings in step 10 above):
+```bash
+source /root/tools-upi-migrate/lab-config.sh
+NEW_PAT='<new-dockerhub-pat>'                      # « CHANGE »
+python3 - "$ARTIFACTORY_USER" "$ARTIFACTORY_PASS" "$DOCKERHUB_USER" "$NEW_PAT" <<'PY'
+import sys,json,urllib.request,base64
+au,ap,du,pat=sys.argv[1:5]; b="http://localhost:8081"
+h={"Authorization":"Basic "+base64.b64encode(f"{au}:{ap}".encode()).decode(),"Content-Type":"application/json"}
+rd=lambda d:json.load(urllib.request.urlopen(urllib.request.Request(b+"/service/extdirect",
+    data=json.dumps({"action":"coreui_Repository","method":"read","tid":1,"type":"rpc","data":d}).encode(),headers=h)))
+repo=next(r for r in rd([])["result"]["data"] if r["name"]=="remote-dockerhub")
+repo.pop("status",None); repo.pop("url",None)
+repo["attributes"].setdefault("httpclient",{})["authentication"]={"type":"username","username":du,"password":pat}
+upd=json.load(urllib.request.urlopen(urllib.request.Request(b+"/service/extdirect",
+    data=json.dumps({"action":"coreui_Repository","method":"update","tid":2,"type":"rpc","data":[repo]}).encode(),headers=h)))
+print("update success:", upd["result"]["success"])
+PY
+```
+Then update `DOCKERHUB_PASS` in `lab-config.sh` so a future `setup-artifactory.sh` re-run stays consistent. Also bump the source PAT's expiry in Docker Hub, or this recurs.
+
+> **Pull-path reminder (not a bug — a foot-gun).** Over the `:8443` HAProxy front, the docker path is `${ARTIFACTORY_HOST}:8443/<image>` with **no `ocp-images/` prefix** — the HAProxy frontend (`/etc/haproxy/conf.d/artifactory.cfg`) rewrites `/v2/...` → `/repository/ocp-images/v2/...`. Pulling `…:8443/ocp-images/minio/minio` double-prefixes the path and returns `manifest unknown`. Correct: `…:8443/minio/minio`. This matches the cluster's IDMS/ITMS mirrors, which all use the bare-host form (`docker.io → artifactory…:8443`).
+
 ---
 
 ## 4. Deploy the Test Application

@@ -44,6 +44,6 @@ clife-known-good/**
 clife-pre-build-4/**
 doc-sources/**
 .config/**
-
+go/**
 
 secrets-for-lab.sh
