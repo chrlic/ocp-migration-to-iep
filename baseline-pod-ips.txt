@@ -1,7 +1,6 @@
-NAME                             READY   STATUS    RESTARTS   AGE   IP            NODE                                     NOMINATED NODE   READINESS GATES
-details-v1-698d88b-99f67         1/1     Running   0          60m   10.128.2.20   worker-m-0.ocp-migrate.md.prglab.local   <none>           <none>
-productpage-v1-675fc69cf-w9t49   1/1     Running   0          60m   10.131.0.17   worker-m-1.ocp-migrate.md.prglab.local   <none>           <none>
-ratings-v1-6484c4d9bb-6mjtj      1/1     Running   0          60m   10.128.2.21   worker-m-0.ocp-migrate.md.prglab.local   <none>           <none>
-reviews-v1-5b5d6494f4-xbftw      1/1     Running   0          60m   10.128.2.22   worker-m-0.ocp-migrate.md.prglab.local   <none>           <none>
-reviews-v2-5b667bcbf8-vskzz      1/1     Running   0          60m   10.128.2.23   worker-m-0.ocp-migrate.md.prglab.local   <none>           <none>
-reviews-v3-5b9bd44f4-ff9g8       1/1     Running   0          60m   10.128.2.24   worker-m-0.ocp-migrate.md.prglab.local   <none>           <none>
+details-v1-8bfb7b9b4-vg4wf Running 10.129.2.18 worker-m-0.ocp-migrate.md.prglab.local
+productpage-v1-6f6cbc5b9-lmmnn Running 10.129.2.21 worker-m-0.ocp-migrate.md.prglab.local
+ratings-v1-95bcbd868-jqv57 Running 10.129.2.19 worker-m-0.ocp-migrate.md.prglab.local
+reviews-v1-55db67c484-zc6mf Running 10.131.0.11 worker-m-2.ocp-migrate.md.prglab.local
+reviews-v2-666bc4466d-88f7s Running 10.131.0.12 worker-m-2.ocp-migrate.md.prglab.local
+reviews-v3-6559fcc79b-s2w6l Running 10.129.2.20 worker-m-0.ocp-migrate.md.prglab.local

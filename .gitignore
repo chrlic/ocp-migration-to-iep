@@ -21,6 +21,7 @@ Thumbs.db
 logs/
 
 pull-secret*
+*.crt
 anaconda-ks.cfg
 .bash*
 .cshrc
@@ -45,5 +46,6 @@ clife-pre-build-4/**
 doc-sources/**
 .config/**
 go/**
+local/**
 
 secrets-for-lab.sh

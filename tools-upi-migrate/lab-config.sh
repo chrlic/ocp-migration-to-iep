@@ -1,6 +1,6 @@
 # ============================================================
 # LAB CONFIGURATION — UPI Migration Lab
-# OCP 4.16 with OVN-Kubernetes → Isovalent Enterprise Platform
+# OCP 4.20 with OVN-Kubernetes → Isovalent Networking for Kubernetes (IEP 1.18)
 # Single source of truth for all env vars in this lab.
 # Usage: source /root/tools-upi-migrate/lab-config.sh
 # ============================================================
@@ -9,7 +9,7 @@
 export PATH=/usr/local/bin:$PATH
 
 # --- OCP Cluster ---
-export OCP_VERSION=4.16.36                                  # « CHANGE » Target OCP z-stream version
+export OCP_VERSION=4.20.24                                  # « CHANGE » Target OCP z-stream version
 export CLUSTER_NAME=ocp-migrate                             # « CHANGE » Cluster name (part of FQDNs)
 export BASE_DOMAIN=md.prglab.local                          # « CHANGE » Base DNS domain
 
@@ -67,8 +67,8 @@ export SSH_KEY_FILE=/root/.ssh/id_rsa.pub                   # « CHANGE »
 #   - 1.16 and earlier: clife-v<X.Y.Z>-cee.N.tar.gz (legacy -cee.N suffix)
 # Set CILIUM_EE_VERSION (e.g. 1.17.15), CLIFE_DOCS_PATH (e.g. v1.17 or v25.11),
 # and CEE_SUFFIX (empty for 1.17+, "cee.N" for 1.16 and earlier).
-export CILIUM_EE_VERSION=1.17.15                            # « CHANGE » Certified IEP version for your OCP minor
-export CLIFE_DOCS_PATH=v1.17                                # « CHANGE » v1.17 for 1.17.x, v25.11 for 1.18.x
+export CILIUM_EE_VERSION=1.18.10                            # « CHANGE » Certified IEP version for your OCP minor
+export CLIFE_DOCS_PATH=v25.11                               # « CHANGE » v1.17 for 1.17.x, v25.11 for 1.18.x
 export CEE_SUFFIX=                                          # « CHANGE » empty for 1.17+; cee.N for 1.16 and earlier
 if [ -n "${CEE_SUFFIX}" ]; then
   export CLIFE_TARBALL="clife-v${CILIUM_EE_VERSION}-${CEE_SUFFIX}.tar.gz"

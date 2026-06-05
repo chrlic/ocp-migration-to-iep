@@ -1988,4 +1988,484 @@ After the cluster is migrated and healthy:
 
 ---
 
-*Based on official Isovalent documentation: "Install Networking for Kubernetes on Red Hat OpenShift" and "Migrate from OpenShift OVN-Kubernetes to Networking for Kubernetes" (CLife 1.18.x)*
+# Section U — Upgrade: OCP 4.16 → 4.20 and IEP 1.17 → 1.18
+
+> **Goal of this section** (executed/validated on the `ocp-migrate` cluster, started 2026-06-04):
+> take the migrated cluster from **OCP 4.16.36 + IEP 1.17.15** to **OCP 4.20 + IEP 1.18**.
+> This is an air-gapped UPI cluster; release payloads are served on-demand by the
+> bastion Artifactory pull-through (`quay.io/openshift-release-dev → artifactory…:8443`).
+
+## U.0 — Why this exact order (compatibility gates)
+
+From the RH/Isovalent matrix ([[reference-iep-compatibility]] / RH article 5436171):
+
+| IEP | Certified OCP |
+|---|---|
+| 1.17 (Isovalent Networking for Kubernetes) | 4.16, **4.18–4.20** (NOT 4.17) |
+| 1.18 | **4.19–4.20** (NOT ≤4.18) |
+
+Hard constraints:
+- **OCP cannot skip minors** → must step 4.16 → 4.17 → 4.18 → 4.19 → 4.20.
+- **IEP 1.18 requires OCP ≥ 4.19** → the IEP 1.17→1.18 upgrade must happen only
+  *after* OCP reaches 4.19+ (we do it at 4.20).
+- **IEP 1.17 is not certified on 4.17** → 4.17 is a *transient* stop; pass through
+  it quickly (4.16→4.17→4.18 back-to-back). It runs fine in practice (1.17 is
+  certified on the 4.16 and 4.18 minors either side); the gap is a support-matrix
+  formality, acceptable for the lab.
+
+**Resulting sequence:**
+1. OCP 4.16.36 → 4.17.z   (IEP stays 1.17.15)
+2. OCP 4.17.z → 4.18.z    (IEP stays 1.17.15)
+3. OCP 4.18.z → 4.19.z    (IEP stays 1.17.15)
+4. OCP 4.19.z → 4.20.z    (IEP stays 1.17.15)
+5. IEP 1.17 → 1.18        (only now that OCP is 4.20)
+
+> Keep IEP on 1.17 through the whole OCP climb; do **not** try to move IEP to 1.18
+> early — it is rejected on ≤4.18 and there's no benefit to doing it at 4.19 vs 4.20.
+
+## U.1a — Disconnected prerequisites & lessons learned (DO THIS FIRST)
+
+On a connected cluster `oc adm upgrade --to=<ver>` "just works". On this
+air-gapped/proxy cluster, **three things block the upgrade from even starting**,
+and you must clear all three before the CVO will move. These were learned the
+hard way on the first hop — do them up front:
+
+| # | Symptom | Root cause | Fix |
+|---|---|---|---|
+| 1 | `RetrievedUpdates=False`, no targets from `oc adm upgrade` | update graph at `api.openshift.com` unreachable | Don't use channel upgrades — drive **by digest** (U.1). Resolve the digest from Artifactory yourself. |
+| 2 | `Upgradeable=False` **and** `Failing: ClusterOperatorNotAvailable: insights` — CVO won't start `Progressing` | `insights` can't reach console.redhat.com → `Available=False`. This is a **hard** block, not just the `Upgradeable=False` warning. | `support` secret `disableUpload=true` (below). `managementState=Removed` does **NOT** work — the CVO keeps managing insights. |
+| 3 | `ReleaseAccepted=False: unable to verify … keyrings: verifier-public-key-redhat` | CVO fetches release signatures from googleapis/mirror.openshift.com — both unreachable | `--force` on the upgrade command (waives signature verification; acceptable because the payload comes from our trusted Artifactory mirror). |
+
+**Clear the insights block (prerequisite #2):**
+```bash
+export KUBECONFIG=/root/ocp-upi-migrate/auth/kubeconfig
+oc create secret generic support -n openshift-config --from-literal=disableUpload=true
+oc delete pod -n openshift-insights -l app=insights-operator     # restart to pick it up
+# verify before proceeding — must be Available=True, Degraded=False, Upgradeable=True:
+oc get co insights -o jsonpath='{range .status.conditions[*]}{.type}={.status} {end}{"\n"}'
+```
+> This is a one-time setup per cluster — the `support` secret persists, so
+> prerequisite #2 stays cleared for all four OCP hops. Prerequisites #1 and #3
+> apply on **every** hop (each is a fresh digest + force).
+
+> **Aside — what did NOT work (so you don't repeat it):**
+> - `insightsoperator/cluster spec.managementState=Removed` → CVO ignores it,
+>   insights stays Degraded.
+> - Hosting the release **signature ConfigMap** in `openshift-config-managed`
+>   (label `release.openshift.io/verification-signatures`) → the CVO consumed it
+>   but the signature blob from mirror.openshift.com didn't validate against the
+>   embedded key (`no more signatures to check`). Getting it byte-exact wasn't
+>   worth it vs `--force` for a trusted mirror. Documented in case you need true
+>   signature verification later (then mirror signatures with `oc adm release ...`).
+> - `--force` writes `force:true` into `clusterversion.spec.desiredUpdate` but is
+>   only honored on the **next CVO sync** (~1–3 min) — `ReleaseAccepted` flips True
+>   then, not immediately. Don't re-issue thinking it failed; watch for ~3 min.
+
+## U.1 — Air-gapped upgrade mechanics
+
+No upstream update graph (`api.openshift.com` is unreachable behind the corp
+proxy), so channel-based `oc adm upgrade --to=<ver>` can't resolve a target.
+Drive each hop **by release-image digest** instead — the digest is pulled through
+Artifactory (verified: `GET /v2/openshift-release-dev/ocp-release/...` → 200).
+
+Find the latest z-stream tag + resolve its digest for a target minor `X`:
+```bash
+source /root/tools-upi-migrate/lab-config.sh
+H="${ARTIFACTORY_HOST}:${ARTIFACTORY_PORT}"
+# list z-stream tags for the minor
+curl -sk --noproxy '*' -u "$ARTIFACTORY_USER:$ARTIFACTORY_PASS" \
+  "https://$H/v2/openshift-release-dev/ocp-release/tags/list" \
+  | python3 -c 'import sys,json;t=json.load(sys.stdin)["tags"];print([x for x in sorted(t) if x.startswith("4.17.") and x.endswith("-x86_64")][-5:])'
+# resolve a tag to its digest
+curl -sk --noproxy '*' -u "$ARTIFACTORY_USER:$ARTIFACTORY_PASS" -I \
+  -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+  -H "Accept: application/vnd.oci.image.index.v1+json" \
+  "https://$H/v2/openshift-release-dev/ocp-release/manifests/4.17.54-x86_64" | grep -i docker-content-digest
+```
+Then trigger the upgrade with the **canonical** image ref (the cluster IDMS
+rewrites `quay.io/...` → Artifactory automatically — always pass the quay.io ref,
+never the Artifactory host, so the release signature verifies):
+```bash
+oc adm upgrade --to-image \
+  quay.io/openshift-release-dev/ocp-release@sha256:<digest> \
+  --allow-explicit-upgrade --allow-upgrade-with-warnings
+```
+
+> **`--allow-upgrade-with-warnings`** is required here because `insights` reports
+> `Upgradeable=False` — it's cosmetic (can't reach console.redhat.com through the
+> corp proxy), not a real blocker. `--allow-explicit-upgrade` is required because
+> we pass a digest the (unreachable) update graph hasn't "recommended".
+
+> **Two disconnected blockers we hit on the first hop — both REQUIRED on this lab:**
+>
+> 1. **insights `ClusterOperatorNotAvailable` hard-blocks the upgrade** (stronger
+>    than the `Upgradeable=False` warning — the CVO won't even start `Progressing`).
+>    `managementState=Removed` does **not** work (CVO keeps managing it). The fix
+>    that works: tell the insights operator to stop trying to upload, so it goes
+>    `Available=True / Degraded=False`:
+>    ```bash
+>    oc create secret generic support -n openshift-config --from-literal=disableUpload=true
+>    oc delete pod -n openshift-insights -l app=insights-operator   # pick it up
+>    oc get co insights   # → Available=True, Degraded=False, Upgradeable=True
+>    ```
+> 2. **Release signature can't be verified** (`unable to verify … against keyrings:
+>    verifier-public-key-redhat`) — the CVO fetches signatures from
+>    storage.googleapis.com / mirror.openshift.com, both unreachable here. Hosting
+>    the signature ConfigMap is fiddly to get byte-exact; the supported escape
+>    hatch for a **trusted mirror** is `--force` (waives signature verification —
+>    acceptable because the payload comes from our own Artifactory mirror):
+>    ```bash
+>    oc adm upgrade --to-image quay.io/openshift-release-dev/ocp-release@$DIGEST \
+>      --allow-explicit-upgrade --allow-upgrade-with-warnings --force
+>    ```
+>    `force:true` lands in `clusterversion.spec.desiredUpdate` and is honored on
+>    the **next CVO sync** (~1–3 min) — `ReleaseAccepted` flips True then, not
+>    instantly. Confirm with `oc get clusterversion` showing history head
+>    `4.17.54:Partial` + `Progressing=True`.
+
+## U.2 — Pre-flight checks (run before EVERY hop)
+
+```bash
+export KUBECONFIG=/root/ocp-upi-migrate/auth/kubeconfig
+# 1. All COs Available, not Progressing/Degraded (insights Degraded is the known exception)
+oc get co | awk 'NR>1 && ($3!="True"||$4!="False"||$5!="False") {print}'
+# 2. MachineConfigPools healthy (UPDATED=True, DEGRADED=False, no pending)
+oc get mcp
+# 3. All nodes Ready, no SchedulingDisabled left over
+oc get nodes
+# 4. Cilium/CLife healthy
+oc -n cilium get csv | grep clife          # Succeeded
+oc -n cilium rollout status ds/cilium --timeout=2m
+oc -n cilium exec ds/cilium -c cilium-agent -- cilium status --brief   # should print "OK"
+# 5. etcd backup (take one before each control-plane minor bump)
+oc debug node/master-m-0.ocp-migrate.md.prglab.local -- \
+  chroot /host /usr/local/bin/cluster-backup.sh /home/core/etcd-backup-$(date +%F-%H%M) 2>&1 | tail -5
+```
+Do not start a hop unless 1–4 are clean (insights aside) and 5 succeeded.
+
+## U.3 — Per-hop procedure (repeat for 4.17, 4.18, 4.19, 4.20)
+
+```bash
+DIGEST=sha256:<target>          # from U.1
+oc adm upgrade --to-image quay.io/openshift-release-dev/ocp-release@$DIGEST \
+  --allow-explicit-upgrade --allow-upgrade-with-warnings
+# monitor (control plane first, then worker MCP rolls node-by-node — UPI = serial reboots)
+watch oc get clusterversion        # PROGRESSING → desired version, then Completed
+oc get co                          # all bump to the new version
+oc get mcp                         # master then worker pools roll; nodes reboot one at a time
+oc get nodes -w                    # each node: Ready → SchedulingDisabled → reboot → Ready (new kubelet)
+```
+A single minor hop on this 6-node UPI cluster takes ~60–90 min (control plane
+~30 min, then 3 workers reboot serially). **Cilium tolerates the rolling reboots**
+(agent is a DaemonSet; KPR=true). Wait for `clusterversion` = Completed and the
+worker MCP `UPDATED=True` before starting the next hop.
+
+### How to watch each stage (what to check, and what "normal" looks like)
+
+A minor upgrade has **two distinct phases** — knowing which you're in prevents
+false alarms (e.g. "why haven't the nodes rebooted at 78%?" — because node
+reboots are phase 2):
+
+**Phase 1 — CVO payload reconcile (operators), ~0→~95%, NO node reboots yet.**
+The CVO updates the 33 cluster operators in dependency order. Nodes keep the old
+kubelet the entire time; MCPs stay `UPDATED=True`.
+```bash
+# overall progress + which operator the CVO is on
+oc adm upgrade            # "Working towards 4.17.54: NNN of 903 done (X%), waiting on <operator>"
+# operators flipping old→new version (watch the split shrink toward all-new)
+oc get co | awk 'NR>1{print $2}' | sort | uniq -c     # e.g. "3 4.16.36 / 30 4.17.54"
+# which CO is stuck, if progress stalls >15 min on one
+oc get co | awk 'NR==1 || $4=="True" || $5=="True"'   # Progressing or Degraded
+watch oc get clusterversion                            # history head: 4.17.54:Partial → Completed
+```
+Order you'll see: config → etcd → kube-apiserver (slow, rolls 3 masters) →
+kube-controller-manager/scheduler → cloud/machine operators → then a big parallel
+batch (auth, console, ingress, monitoring, image-registry, …) → tail
+(openshift-apiserver, monitoring). `kube-apiserver` and `monitoring` are the
+usual slow ones; minutes on one operator is normal, not a hang.
+
+**Phase 2 — MCO node roll (the reboots), after phase 1 reconcile completes.**
+The machine-config-operator renders a new MachineConfig and rolls it node-by-node:
+**masters first (serial), then the worker pool (serial on UPI)** — each node
+cordons, drains, reboots, rejoins with the new kubelet.
+```bash
+# the authoritative phase-2 view
+oc get mcp                 # master then worker: UPDATING=True while a pool rolls; watch UPDATEDMACHINECOUNT climb
+oc get nodes -w            # each node: Ready,SchedulingDisabled → NotReady (reboot) → Ready
+oc get nodes -o wide       # VERSION column flips v1.29.x (4.16) → v1.30.x (4.17) per node
+# who's mid-roll right now
+oc get nodes | grep SchedulingDisabled
+# Cilium survives the reboots (DaemonSet); confirm the agent on a rebooted node came back
+oc -n cilium get pods -o wide | grep <node>
+oc -n cilium exec ds/cilium -c cilium-agent -- cilium status --brief    # OK
+```
+**Gotcha:** at ~78% you'll see most COs already on the new version but **all nodes
+still on the old kubelet and MCPs `UPDATING=False`** — that's correct. Node
+reboots only begin once `clusterversion` finishes the operator reconcile. Don't
+expect node version changes during phase 1.
+
+**Done when:** `oc get clusterversion` shows history head `4.17.54:Completed`,
+`oc adm upgrade` says *"Cluster version is 4.17.54"*, **all** COs on 4.17.54, both
+MCPs `UPDATED=True UPDATING=False DEGRADED=False`, and every node's VERSION shows
+the new kubelet.
+
+### Practical hint — reboot batching & scaling to large clusters
+
+Node reboots in phase 2 are governed by **`MachineConfigPool.spec.maxUnavailable`**
+(per pool):
+- **Control plane**: effectively **always serial** — the MCO never takes down more
+  than one master (etcd needs 2-of-3 quorum). Don't change it.
+- **Workers**: `maxUnavailable` (default **1** = one node at a time) sets the batch
+  size. Accepts an integer or a percentage:
+  ```bash
+  oc patch mcp worker --type=merge -p '{"spec":{"maxUnavailable":"10%"}}'
+  ```
+- Per-node cycle: cordon → drain (honors PodDisruptionBudgets) → apply MC →
+  reboot → uncordon → wait Ready → next batch.
+
+On this 6-node lab, default serial is fine (~3 workers × ~7 min ≈ 20 min/hop) and
+clearer to watch. **At scale (e.g. 100 nodes) serial is impractical** (8–16 h of
+worker reboots) — tune it:
+1. **`maxUnavailable: 10%`** (or an absolute 5–10) on the worker pool → ~10 waves
+   instead of 100. Needs ~that much spare capacity to absorb drained pods.
+2. **PodDisruptionBudgets on your apps** are the real "non-disruptive" lever — even
+   with a large batch, a PDB stops the drain from evicting too many replicas of a
+   given app at once. Without PDBs, a big batch can briefly take all replicas of a
+   small Deployment offline.
+3. **Split workers into multiple MCPs** (by rack/AZ/workload) to roll independently
+   and never drain a whole failure domain at once.
+4. **EUS-to-EUS pause trick** (directly relevant here — 4.16/4.18/4.20 are all EUS):
+   pause the worker pool across two control-plane minor bumps and reboot workers
+   **once** instead of twice:
+   ```bash
+   oc patch mcp worker --type=merge -p '{"spec":{"paused":true}}'   # before 4.16→4.18
+   # ... do 4.16→4.17→4.18 control-plane hops (masters reboot; workers do NOT) ...
+   oc patch mcp worker --type=merge -p '{"spec":{"paused":false}}'  # workers roll once to 4.18
+   ```
+   This halves worker reboot cycles across the 4.16→4.20 climb (2 instead of 4).
+   We do **not** use the pause trick in this lab (serial is fast enough and we want
+   to validate each hop fully), but it's the recommended large-cluster strategy.
+
+### ⚠️ Critical air-gapped gotcha — pre-warm the RHCOS OS-content image before phase 2
+
+**Hit on hop 1, will recur on EVERY node × EVERY hop.** In phase 2 each node runs
+`rpm-ostree rebase` to pull the ~1.2 GB RHCOS OS-content image
+(`quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:...`, ~51 chunk layers).
+On a cold Artifactory cache this pulls **through the corp WSA proxy to quay.io,
+which here runs at ~9 B/s → ~175 KB/s** — so a 1.2 GB image would take ~2 hours.
+The machine-config-daemon retries the rebase every ~75 s, far shorter than that,
+so it **restarts the import forever and never converges**. Symptom:
+- `oc get mcp` → `worker ... DEGRADED=True`
+- MCP message: `Failed to update OS to …ocp-v4.0-art-dev@… after retries: timed out waiting for the condition`
+- MCD log loops: `Executing rebase …` / `Importing … ostree chunk layers needed: 51 (1.2 GB)` every ~75 s, never finishing.
+
+**Fix — pre-warm Artifactory's cache from the bastion so the node imports at local
+speed (~4.5 MB/s cache-hit vs 175 KB/s cold):**
+```bash
+source /root/tools-upi-migrate/lab-config.sh
+H="${ARTIFACTORY_HOST}:${ARTIFACTORY_PORT}"
+# resolve the OS-content digest the node is trying to pull (from the MCD log,
+# or from the release image):
+OSIMG=$(oc adm release info quay.io/openshift-release-dev/ocp-release@<release-digest> \
+  --image-for=machine-os-content 2>/dev/null)   # or read it from the MCD 'Executing rebase' log line
+# pull every layer once → populates Artifactory's pull-through cache:
+skopeo copy --quiet --src-tls-verify=false \
+  --src-creds "$ARTIFACTORY_USER:$ARTIFACTORY_PASS" \
+  docker://$H/openshift-release-dev/ocp-v4.0-art-dev@sha256:<os-digest> \
+  dir:/tmp/osimg 2>&1 | tail -2 && rm -rf /tmp/osimg
+```
+Once cached, the in-flight MCD retry finishes within a minute and the node reboots
+into the new OS. **Do this BEFORE starting phase 2 on each hop** (pre-warm the
+target minor's OS image while phase 1 runs), or proactively the moment you see the
+worker MCP go DEGRADED. The cache persists, so all nodes of that hop benefit.
+
+> Root cause is the throttled bastion→quay path, not Artifactory. The real
+> long-term fix is a faster upstream or a full `oc-mirror` of release payloads;
+> pre-warming per hop is the pragmatic workaround for this lab. Consider raising
+> the MCD's tolerance is **not** an option (it's not tunable) — pre-warming is the fix.
+
+### Two infra prerequisites the pre-warm itself exposed (hit before hop 2)
+
+Pre-warming large OS blobs only works if **two more things** are right — both bit
+us trying to pre-warm 4.18:
+
+**(a) HAProxy 60 s server timeout cuts slow blob fetches → 504.** The bastion
+HAProxy `:8443` front (`/etc/haproxy/conf.d/artifactory.cfg`) inherits the global
+`timeout server 1m` / `timeout client 1m`. A cold ~700 MB blob through the slow
+proxy takes far longer, so HAProxy returns **504 at exactly 60 s** regardless of
+Nexus. Fix — raise the timeout *only* on the artifactory front/backend (don't
+touch the OCP API/MCS timeouts):
+```
+# frontend artifactory_https:   timeout client 15m
+# backend  artifactory_http:    timeout server 15m
+haproxy -c -f /etc/haproxy/haproxy.cfg && systemctl reload haproxy
+```
+
+**(b) Nexus blobstore partition full → `BlobStoreException: Couldn't get file
+lock`, HTTP 500 on every new manifest/blob.** The repeated 1.2 GB OS-image pulls
+filled `/home` (the Nexus `blobs/` partition) to 100%. Symptom: fast 500s (not
+timeouts) and Nexus log `BlobStoreException … Couldn't get file lock`. The orphan
+"Cleanup unused docker blobs" task frees ~nothing (cache is all live-referenced).
+Fix that worked — **relocate the blobstore to the larger root FS via bind-mount**
+(the lab's `/` had 118 GB free vs `/home` 49 GB; VG had 0 free extents so growing
+the LV wasn't an option):
+```bash
+systemctl stop nexus-migrate.service && podman stop nexus-migrate
+mkdir -p /var/nexus-blobs
+mv /home/nexus-data/blobs /var/nexus-blobs/blobs            # ~2 min for 48 GB
+mkdir -p /home/nexus-data/blobs
+mount --bind /var/nexus-blobs/blobs /home/nexus-data/blobs
+echo "/var/nexus-blobs/blobs /home/nexus-data/blobs none bind 0 0" >> /etc/fstab   # persist
+systemctl start nexus-migrate.service                       # ~90 s to ready
+```
+Nexus is none the wiser (the container's `/home/nexus-data` bind path is
+unchanged). ~5 min downtime; in-flight cluster image pulls retry and resume. After
+this, previously-cached content still serves AND new versions (4.19/4.20) cache
+fine. **Do this proactively** if `df -h /home` is near full before a hop —
+budget ~1.5–2 GB of cache per OCP minor's OS image.
+
+### Hop 1 — 4.16.36 → 4.17.54 (completed 2026-06-04) ✅
+- Target digest: `sha256:09a398636aed764ab301bcfc26a2426b245960573b3dcf6df7773688f3b7f229`
+- Prereqs cleared: insights `support`/`disableUpload` secret (one-time), `--force`
+  (signature bypass).
+- Phase 1 (operators): ~50 min, clean. Slowest operators: kube-apiserver,
+  monitoring, and the `multus-additional-cni-plugins` DaemonSet (6-step init per
+  node — looks stuck but isn't).
+- Phase 2 (node reboots): hit the **OS-image cold-pull timeout** on worker-m-0
+  (worker MCP DEGRADED). Fixed by pre-warming the Artifactory cache (skopeo). After
+  that, all 6 nodes rolled cleanly (masters serial, workers serial), ~6 min/node.
+- **Result:** `Cluster version is 4.17.54`; all 33 COs on 4.17.54; 6 nodes on
+  v1.30.14; both MCPs Updated, no degrade; Cilium/CLife 1.17.15 `OK` throughout;
+  ingress/app dataplane stayed available (Timescape UI HTTP 200 mid-upgrade).
+- Transient post-reboot etcd/machine-config Degrade on the last master cleared
+  itself within ~2 min during the CVO final reconcile — not a real fault.
+- **Total hop time ≈ 1h40m** (longer than nominal due to the one-time cold OS pull;
+  subsequent hops faster if you pre-warm the OS image during phase 1).
+
+> **For hops 2–4 (4.18, 4.19, 4.20):** insights stays cleared (secret persists).
+> Per hop: resolve digest → pre-warm the target OS-content image → etcd backup →
+> `oc adm upgrade --to-image … --allow-explicit-upgrade --allow-upgrade-with-warnings --force`.
+> **Pre-warm the OS image during phase 1** so phase 2 never hits the timeout.
+
+## U.4 — IEP 1.17 → 1.18 (executed 2026-06-04, only after OCP = 4.20) ✅
+
+CLife on this cluster is an **OLM Subscription** (`oc -n cilium get subscription clife`),
+channel `1.17`, source `certified-operators`, **Manual** approval. The certified
+catalog already carries the 1.18 channel — verify with:
+```bash
+oc get packagemanifest clife -n openshift-marketplace \
+  -o jsonpath='{range .status.channels[*]}{.name} -> {.currentCSV}{"\n"}{end}'
+# 1.16 -> clife.v1.16.23-cee.1 / 1.17 -> clife.v1.17.16-cee.1 / 1.18 -> clife.v1.18.10-cee.1
+```
+So the upgrade is a **channel switch**, not a tarball reinstall.
+
+**Steps (as executed):**
+```bash
+export KUBECONFIG=/root/ocp-upi-migrate/auth/kubeconfig
+# 0. pre-flight: cilium OK, 1.18 images pullable, etcd backup, SNAPSHOT CiliumConfig
+oc -n cilium exec ds/cilium -c cilium-agent -- cilium status --brief         # OK
+oc -n cilium get ciliumconfig ciliumconfig -o yaml > /root/ciliumconfig-pre-1.18.yaml
+oc debug node/master-m-0... -- chroot /host /usr/local/bin/cluster-backup.sh /home/core/etcd-iep118
+
+# 1. switch the subscription channel
+oc -n cilium patch subscription clife --type=merge -p '{"spec":{"channel":"1.18"}}'
+
+# 2. GOTCHA: a stale unapproved InstallPlan blocks re-resolution. If `oc -n cilium
+#    get installplan` still only shows old (1.17.x) plans and the subscription is
+#    InstallPlanPending, DELETE the stale unapproved plan so OLM resolves to 1.18:
+oc -n cilium get installplan   # find the unapproved 1.17.x plan
+oc -n cilium delete installplan <stale-1.17.x-plan>
+#    Within ~30 s a new plan for clife.v1.18.10-cee.1 appears (approved=false).
+
+# 3. approve the 1.18 InstallPlan
+oc -n cilium patch installplan <new-1.18-plan> --type=merge -p '{"spec":{"approved":true}}'
+
+# 4. watch CSV replace + the Cilium DS roll to the 1.18 agent
+oc -n cilium get csv -w        # 1.17.15 Replacing → 1.18.10 Installing → Succeeded
+oc -n cilium get ds cilium -o jsonpath='{.spec.template.spec.containers[0].image}'  # → v1.18.10-cee.1
+oc -n cilium rollout status ds/cilium                                   # 6/6 updated
+```
+
+**Result:** CSV `clife.v1.18.10-cee.1 Succeeded` in <1 min (no unpack-job hang this
+time); Cilium DS + operator rolled to `v1.18.10-cee.1`, 6/6 ready in ~90 s.
+CiliumConfig customizations **preserved** (KPR=true, k8sServiceHost) — the operator
+replacement does not reset the CR. `patch-cilium-k8s-host.sh` **NOT needed** (KPR=true).
+Cluster health 6/6, app dataplane stayed up (Timescape UI HTTP 200 throughout).
+
+### Do you need to drain/evict pods during the IEP (Cilium agent) upgrade? — NO
+
+Unlike the OCP node upgrades (which reboot the kernel, so the MCO cordons+drains),
+the Cilium agent upgrade is a **DaemonSet rolling restart — nodes are NOT drained,
+and you should not drain them**:
+- Cilium's datapath is **eBPF programs in the kernel**, not the agent process. While
+  an agent pod restarts to the new version (~5–10 s), the loaded eBPF maps/programs
+  stay in place, so **existing traffic flows uninterrupted** (agent restart is
+  dataplane-transparent by design).
+- The only brief gap is **control-plane** (new policy/endpoint *changes* aren't
+  processed during the agent restart) — not established connections.
+- Draining would cause *more* disruption than the agent restart itself, and is
+  unnecessary. (A datapath-incompatible CNI change — rare, major versions — is
+  handled by Cilium's own endpoint regeneration, still without a manual drain; the
+  vendor guide flags any "expect brief dataplane disruption" case. A 1.17→1.18 minor
+  is designed non-disruptive.)
+
+Verified here: workloads kept running and the app route served HTTP 200 across the
+whole agent roll — no eviction performed, none needed.
+
+## U.5 — Rollback notes
+- **OCP**: minor upgrades are **not** rollback-able once the control plane moves.
+  Mitigation is the per-hop etcd backup (U.2 step 5) + the ability to re-pull the
+  prior release digest only *while still on it*. Treat each hop as forward-only;
+  validate before proceeding.
+- **IEP**: OLM can roll a CSV back to the previous version if the new one fails to
+  install (before the DS fully rolls); keep the 1.17.15 manifests handy.
+
+---
+
+## Appendix W — Deltas: OCP 4.20.24 + IEP 1.18.10 vs the 4.16 + IEP 1.17.15 baseline
+
+A full **fresh install (OVN) → migrate to IEP 1.18.10** was re-validated end-to-end on
+**OCP 4.20.24** (2026-06-05, `ocp-migrate` cluster). Result: green — `networkType=Cilium`,
+34/34 COs, 6/6 nodes, Cilium **1.18.10-cee.1** OK, CLife CSV Succeeded, KPR=true, cluster
+health 6/6; Bookinfo survived and re-IP'd from the OVN CIDR (10.129/10.131) to the Cilium
+CIDR (**10.253.x**) with the route still HTTP 200. This appendix records only what
+**deviated** from the body of this guide; unchanged steps are not repeated.
+
+### W.1 — NEW / EXTRA steps (not in the 4.16/1.17 baseline)
+
+| # | Area | Delta |
+|---|------|-------|
+| 1 | **CLife tarball path** | 1.18.x lives under `docs.isovalent.com/v25.11/public/clife/clife-v1.18.10.tar.gz` (was `/v1.17/...` for 1.17). Set `CLIFE_DOCS_PATH=v25.11`. Image tag still carries `-cee.N` (`clife:v1.18.10-cee.1`). |
+| 2 | **bastion reuse — stale RHCOS** | `download-rhcos.sh`'s "already exists" skip is **version-blind**. Re-installing a new OCP minor on a reused bastion keeps the OLD RHCOS. **Delete `${RHCOS_DIR}/{rhcos-live.iso,rhcos-rootfs.img,rhcos-vmlinuz,rhcos-initrd.img}` first.** (4.20.24 = rhel-9.6 build `9.6.20260217-1`.) |
+| 3 | **bastion reuse — stale installer state** | A stale `.openshift_install_state.json` from the prior installer makes the 4.20 `openshift-install` fatal: `failed to fetch Master Machines: ... cannot unmarshal string into Go value of type rhcos.Image`. Clear the install dir before `gen-ignition.sh`: `rm -f .openshift_install_state.json .openshift_install.log install-config.yaml*; rm -rf auth ignition manifests openshift *.ign metadata.json` (keep `rhcos/`, `clife/`). |
+| 4 | **bastion reuse — stale DHCP leases** | New VMs get new MACs, but old static IP↔MAC leases persist in `/var/lib/dnsmasq/dnsmasq.leases` → dnsmasq refuses the new MACs (`no address available` / `... is leased to <old MAC>`) → nodes never PXE. **After `recreate-vms.sh`, before PXE: `systemctl stop dnsmasq; : > /var/lib/dnsmasq/dnsmasq.leases; systemctl start dnsmasq`.** |
+| 5 | **govc creds** | `govc-env.sh` must `source /root/secrets-for-lab.sh` **after** `lab-config.sh` (real `VCENTER_*` live there; lab-config has empty placeholders). |
+| 6 | **insights on fresh install** | The air-gapped `insights` block (can't reach console.redhat.com) also stalls a **fresh** install-complete, not just upgrades. Same fix as §U.1a: `oc create secret generic support -n openshift-config --from-literal=disableUpload=true` + restart the insights pod. |
+
+### W.2 — Script ordering / robustness gaps (fix in the tooling)
+
+- **`setup-pxe.sh` must run AFTER `recreate-vms.sh`** — it reads VM MACs via `govc vm.info` to write per-MAC PXE configs; on a fresh wipe the VMs don't exist yet → Python `TypeError: NoneType ... subscriptable`. Correct order: `gen-ignition → recreate-vms → setup-pxe → pxe-install-and-boot`.
+- **`do-migration.sh` Phase 4.2 gate is too strict for the from-OVN path.** It waits for `cilium-ds` fully Ready — but during OVN coexistence the node default route is on OVN's `br-ex`, so the cilium-agent **cannot** start (`unable to determine direct routing device`) and crashloops on all nodes **until Phase 6 reboots tear down br-ex.** This is EXPECTED (guide §7 4.3 even says so). **Do NOT "fix" it by adding `devices`/`directRoutingDevice` to the CiliumConfig** — tested, doesn't help (br-ex still owns the route pre-reboot) and `directRoutingDevice` isn't passed through CLife's schema. Post-reboot, Cilium auto-detects `ens192` with no config. Relax the 4.2 gate to "DS exists + clife ready", or `-y` past it.
+- **Interrupting `do-migration.sh` at the 4.2 crashloop skips Phases 4.3 + 5 — and 4.3 is essential.** Phase 4.3 repoints the multus readiness-indicator from `10-ovn-kubernetes.conf` → `05-cilium.conflist`. If skipped, a node reboots onto Cilium but **multus crashloops waiting for the now-gone OVN file → never writes `00-multus.conf` → node stuck NotReady** (`NetworkPluginNotReady: no CNI configuration file`). Always run 4.3 (+5) before unpausing MCPs.
+- **Phase 5's kube-apiserver restart (5.1) can kill the script itself** (oc calls fail during the API blip), silently skipping 5.2–5.4. Make Phase 5 resilient / re-runnable, and verify afterward that `overrides=null` and `network-operator replicas=1`.
+
+### W.3 — Phase-6 sequencing & scaling
+
+- **A paused master MCP blocks the *worker* roll from finishing.** The machine-config-controller won't sync drains for ANY pool while one is paused → the last worker's drain hangs ("requesting cordon and drain via annotation to controller", then nothing), worker stuck e.g. 2/3, MCO `Degraded: MachineConfigPool master is paused`. **Fix: unpause the master MCP too** (the controller resumes; workers finish; masters roll serially). Practically: unpause worker, then unpause master shortly after — don't wait for worker to be 100% done.
+- **Large clusters — batch the worker reboots:** `oc patch mcp worker --type=merge -p '{"spec":{"maxUnavailable":"25%"}}'` (default 1 = serial; 100 workers serial ≈ 10h vs 25% ≈ ~1h). Gated in practice by **PodDisruptionBudgets + spare capacity** (MCO cordons+drains honoring PDBs). **Masters always serial** (etcd quorum — don't raise). Keep the batch **moderate (10–25%)** for *this* migration since the window is mixed-CNI (cross-CNI traffic degraded until both ends are on Cilium). Orthogonal to the EUS reboot-count trick in §U.
+
+### W.4 — Steps NO LONGER necessary (don't cargo-cult)
+
+- **`patch-cilium-k8s-host.sh`** — not needed under **KPR=true** (already noted in §U; reconfirmed here). The 1.17 lab controller-manager manifest also carried `KUBERNETES_SERVICE_HOST/PORT` env on the manager; **stock 1.18 drops them and doesn't need them.**
+- **Manual image-tag bump in the controller-manager manifest** — stock 1.18 tarball already ships the correct digest-pinned `clife:v1.18.10-cee.1`; no edit needed (baseline required bumping it).
+- **Subscription channel edit** — stock 1.18 `subscription.yaml` already has `channel: "1.18", source: certified-operators`; no edit needed.
+
+### W.5 — CHANGED but equivalent
+
+- **CiliumConfig customization** is the only manifest needing edits for 1.18 (stock 1.18 CiliumConfig == stock 1.17, no schema change). Apply: `metadata.namespace: cilium`; `cluster.name/id` (set at install to avoid the §V rename-cert pain); `ipam.operator.clusterPoolIPv4PodCIDRList: [10.253.0.0/16]` mask 24; `kubeProxyReplacement: "true"` + `k8sServiceHost/Port`; hubble metrics/export. Do **not** add `devices` (see W.2).
+- **`imageContentSources` → `ImageDigestSources`** — 4.20 install-config warns `imageContentSources is deprecated`; still functional (warning only). Migrate the field when convenient.
+- **kubelet version map extends:** 4.19=v1.32, **4.20=v1.33** (4.20.24 = v1.33.12).
+
+---
+
+*Based on official Isovalent documentation: "Install Networking for Kubernetes on Red Hat OpenShift" and "Migrate from OpenShift OVN-Kubernetes to Networking for Kubernetes" (CLife 1.18.x). Appendix W validated on OCP 4.20.24 + IEP 1.18.10, 2026-06-05.*
